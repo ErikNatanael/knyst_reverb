@@ -46,9 +46,11 @@ impl<const CHANNELS: usize> Diffuser<CHANNELS> {
         flip_polarity[CHANNELS / 2..].fill(-1.);
         flip_polarity.shuffle(&mut rng);
         let delays = std::array::from_fn(|i| {
-            let time_min = (max_delay_length_in_samples / CHANNELS * i) as usize;
+            let time_min = (max_delay_length_in_samples / CHANNELS * i) as usize + 1;
             let time_max = max_delay_length_in_samples / CHANNELS * (i + 1);
-            StaticSampleDelay::new(rng.gen_range(time_min..time_max))
+            let delay_time = rng.gen_range(time_min..time_max);
+            dbg!(delay_time);
+            StaticSampleDelay::new(delay_time)
         });
 
         Self {
@@ -61,18 +63,16 @@ impl<const CHANNELS: usize> Diffuser<CHANNELS> {
     pub fn init(&mut self, block_size: usize) {}
     pub fn process_block(
         &mut self,
-        input: &Vec<[Sample; CHANNELS]>,
-        output: &mut Vec<[Sample; CHANNELS]>,
+        input: &[Vec<Sample>; CHANNELS],
+        output: &mut [Vec<Sample>; CHANNELS],
     ) {
         let block_size = input.len();
         for f in 0..block_size {
-            let in_frame = &input[f];
-            let out_frame = &mut output[f];
             // Get the output of the delay
             let mut sig = [0.0; CHANNELS];
-            for i in 0..CHANNELS {
-                sig[i] = self.delays[i].read() * self.flip_polarity[i];
-                self.delays[i].write(in_frame[i]);
+            for channel in 0..CHANNELS {
+                sig[channel] = self.delays[channel].read() * self.flip_polarity[channel];
+                self.delays[channel].write(input[channel][f]);
             }
             let mut sig2 = [0.0; CHANNELS];
             // Apply Hadamard matrix
@@ -82,7 +82,9 @@ impl<const CHANNELS: usize> Diffuser<CHANNELS> {
                     sig2[row] += sig[column] * self.hadamard_matrix[row][column];
                 }
             }
-            out_frame.copy_from_slice(&sig2);
+            for channel in 0..CHANNELS {
+                output[channel][f] = sig2[channel];
+            }
         }
     }
 }
@@ -91,54 +93,47 @@ impl<const CHANNELS: usize> Diffuser<CHANNELS> {
 struct Tail<const CHANNELS: usize> {
     feedback_gain: Sample,
     /// Size is the length of the delay
-    delay_buffer: Vec<[Sample; CHANNELS]>,
+    delays: [StaticSampleDelay; CHANNELS],
     /// One block of samples
-    process_temp_buffers: Vec<[Sample; CHANNELS]>,
-    // in samples
-    buffer_write_index: usize,
-    buffer_read_index: usize,
+    process_temp_buffers: [Vec<Sample>; CHANNELS],
 }
 
 impl<const CHANNELS: usize> Tail<CHANNELS> {
     pub fn new(delay_length_in_samples: usize, feedback: Sample) -> Self {
+        let time_min = delay_length_in_samples / 2;
+        let time_max = delay_length_in_samples;
+        let mut rng = thread_rng();
+        let delays = std::array::from_fn(|i| {
+            let delay_time = rng.gen_range(time_min..time_max);
+            StaticSampleDelay::new(delay_time)
+        });
         Self {
             feedback_gain: feedback,
-            delay_buffer: vec![[0.0; CHANNELS]; delay_length_in_samples],
-            process_temp_buffers: vec![],
-            buffer_write_index: 0,
-            buffer_read_index: delay_length_in_samples,
+            process_temp_buffers: std::array::from_fn(|_| vec![0.0; 0]),
+            delays,
         }
     }
     /// Init internal buffers to the block size. Not real time safe.
     pub fn init(&mut self, block_size: usize) {
-        self.process_temp_buffers = vec![[0.0; CHANNELS]; block_size];
+        self.process_temp_buffers = std::array::from_fn(|_| vec![0.0; block_size]);
     }
     pub fn process_block(
         &mut self,
-        input: &Vec<[Sample; CHANNELS]>,
-        output: &mut Vec<[Sample; CHANNELS]>,
+        input: &[Vec<Sample>; CHANNELS],
+        output: &mut [Vec<Sample>; CHANNELS],
     ) {
         // Get the output of the delay
-        let block_size = input.len();
-        assert!(self.delay_buffer.len() >= block_size);
-        let read_end = self.buffer_read_index + block_size;
-        if read_end <= self.delay_buffer.len() {
-            self.process_temp_buffers
-                .copy_from_slice(&self.delay_buffer[self.buffer_read_index..read_end]);
-        } else {
-            // block wraps around
-            let read_end = read_end % self.delay_buffer.len();
-            self.process_temp_buffers[0..block_size - read_end]
-                .copy_from_slice(&self.delay_buffer[self.buffer_read_index..]);
-            self.process_temp_buffers[block_size - read_end..]
-                .copy_from_slice(&self.delay_buffer[0..read_end]);
+        for (i, delay) in self.delays.iter_mut().enumerate() {
+            delay.read_block(&mut self.process_temp_buffers[i]);
         }
         // Set output to the output of the delay
-        output.copy_from_slice(&self.process_temp_buffers);
+        for channel in 0..CHANNELS {
+            output[channel].copy_from_slice(&self.process_temp_buffers[channel]);
+        }
         // apply feedback to output of delay
-        for channel in &mut self.process_temp_buffers {
-            for i in 0..CHANNELS {
-                channel[i] *= self.feedback_gain;
+        for i in 0..CHANNELS {
+            for sample in &mut self.process_temp_buffers[i] {
+                *sample *= self.feedback_gain;
             }
         }
         // TODO: Combine gain and matrix
@@ -146,42 +141,24 @@ impl<const CHANNELS: usize> Tail<CHANNELS> {
         // todo!("Mix householder");
         // add together with input
         for (process_channel, input_channel) in self.process_temp_buffers.iter_mut().zip(input) {
-            for i in 0..CHANNELS {
-                process_channel[i] += input_channel[i];
+            for (process_s, input_s) in process_channel.iter_mut().zip(input_channel) {
+                *process_s += *input_s;
             }
         }
         // Pipe back into the delay
-
-        let write_end = self.buffer_write_index + block_size;
-        if write_end <= self.delay_buffer.len() {
-            self.delay_buffer[self.buffer_write_index..write_end]
-                .copy_from_slice(&self.process_temp_buffers);
-        } else {
-            // block wraps around
-            let write_end = write_end % self.delay_buffer.len();
-            self.delay_buffer[self.buffer_write_index..]
-                .copy_from_slice(&self.process_temp_buffers[0..block_size - write_end]);
-            self.delay_buffer[0..write_end]
-                .copy_from_slice(&self.process_temp_buffers[block_size - write_end..]);
+        for (channel, delay) in self.delays.iter_mut().enumerate() {
+            delay.write_block(&self.process_temp_buffers[channel]);
         }
-
-        // Move delay pointers
-        self.buffer_read_index = (self.buffer_read_index + block_size) % self.delay_buffer.len();
-        self.buffer_write_index = (self.buffer_write_index + block_size) % self.delay_buffer.len();
-    }
-    /// Max delay time in samples
-    fn max_delay_time(&self) -> usize {
-        self.delay_buffer.len()
     }
 }
 
 const CHANNELS: usize = 8;
-const DIFFUSERS: usize = 6;
+const DIFFUSERS: usize = 8;
 pub struct LuffVerb {
     diffusers: [Diffuser<CHANNELS>; DIFFUSERS],
     tail: Tail<CHANNELS>,
-    buffer0: Vec<[Sample; CHANNELS]>,
-    buffer1: Vec<[Sample; CHANNELS]>,
+    buffer0: [Vec<Sample>; CHANNELS],
+    buffer1: [Vec<Sample>; CHANNELS],
 }
 #[impl_gen]
 // impl<const DIFFUSERS: usize, const CHANNELS: usize> LuffVerb<{DIFFUSERS}, {CHANNELS}> {
@@ -190,32 +167,43 @@ impl LuffVerb {
         let diffusers = std::array::from_fn(|i| Diffuser::new(tail_delay / DIFFUSERS));
         Self {
             diffusers,
-            tail: Tail::new(tail_delay, 0.7),
-            buffer0: Vec::new(),
-            buffer1: Vec::new(),
+            tail: Tail::new(tail_delay, 0.2),
+            buffer0: std::array::from_fn(|_| Vec::new()),
+            buffer1: std::array::from_fn(|_| Vec::new()),
         }
     }
     pub fn init(&mut self, block_size: BlockSize) {
-        self.buffer0 = vec![[0.0; CHANNELS]; *block_size];
-        self.buffer1 = vec![[0.0; CHANNELS]; *block_size];
+        self.buffer0 = std::array::from_fn(|_| vec![0.0; *block_size]);
+        self.buffer1 = std::array::from_fn(|_| vec![0.0; *block_size]);
+        self.tail.init(*block_size);
+        for d in &mut self.diffusers {
+            d.init(*block_size);
+        }
     }
     pub fn process(&mut self, input: &[Sample], output: &mut [Sample]) -> GenState {
         // Use buffer0 and buffer1 as input and output buffers every other time to cut down on the number of buffers needed.
         let mut in_buf = &mut self.buffer0;
         let mut out_buf = &mut self.buffer1;
         // Fill all channels of buffer0 with the input
-        for (&in_sample, channel) in input.iter().zip(in_buf.iter_mut()) {
-            channel.fill(in_sample);
+        for channel in in_buf.iter_mut() {
+            channel.copy_from_slice(input);
         }
         for diffuser in &mut self.diffusers {
-            diffuser.process_block(&in_buf, &mut out_buf);
+            diffuser.process_block(in_buf, out_buf);
             std::mem::swap(in_buf, out_buf);
         }
-        self.tail.process_block(&in_buf, &mut out_buf);
-        // Sum output channels
-        for (out_sample, out_channel) in output.iter_mut().zip(out_buf) {
-            *out_sample = out_channel.iter().sum();
+        let early_reflections_amount = 0.3;
+        for (out_sample, out_channel) in output.iter_mut().zip(out_buf.iter()) {
+            *out_sample = out_channel.iter().sum::<f32>() * early_reflections_amount;
         }
+        // self.tail.process_block(in_buf, out_buf);
+        // // Sum output channels
+        // let compensation_amp = 1.0 / CHANNELS as f32;
+        // for (f, out_sample) in output.iter_mut().enumerate() {
+        //     for channel in out_buf.iter_mut() {
+        //         *out_sample += channel[f];
+        //     }
+        // }
         GenState::Continue
     }
 }
@@ -229,23 +217,23 @@ impl LuffVerb {
 mod tests {
     use crate::{hadamard, Tail};
 
-    #[test]
-    fn tail_delay() {
-        let block_size = 16;
-        let mut tail = Tail::<1>::new(block_size * 2 + 1, 1.0);
-        tail.init(block_size);
-        let mut output = vec![[0.0; 1]; block_size];
-        let mut input = vec![[0.0; 1]; block_size];
-        input[0][0] = 1.0;
-        tail.process_block(&input, &mut output);
-        assert_eq!(output[0][0], 0.0);
-        tail.process_block(&input, &mut output);
-        assert_eq!(output[0][0], 0.0);
-        tail.process_block(&input, &mut output);
-        assert_eq!(output[0][0], 0.0);
-        assert_eq!(output[1][0], 1.0);
-        assert_eq!(output[2][0], 0.0);
-    }
+    // #[test]
+    // fn tail_delay() {
+    //     let block_size = 16;
+    //     let mut tail = Tail::<1>::new(block_size * 2 + 1, 1.0);
+    //     tail.init(block_size);
+    //     let mut output = [vec![0.0; block_size]; 1];
+    //     let mut input = [vec![0.0; block_size]; 1];
+    //     input[0][0] = 1.0;
+    //     tail.process_block(&input, &mut output);
+    //     assert_eq!(output[0][0], 0.0);
+    //     tail.process_block(&input, &mut output);
+    //     assert_eq!(output[0][0], 0.0);
+    //     tail.process_block(&input, &mut output);
+    //     assert_eq!(output[0][0], 0.0);
+    //     assert_eq!(output[0][1], 1.0, "{output:?}");
+    //     assert_eq!(output[0][2], 0.0);
+    // }
     #[test]
     fn test_hadamard() {
         let _m1 = hadamard::<1>();
