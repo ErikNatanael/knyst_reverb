@@ -1,5 +1,6 @@
 use std::time::SystemTime;
 
+use householder::random_householder;
 use knyst::{
     prelude::{
         delay::{SampleDelay, StaticSampleDelay},
@@ -96,6 +97,7 @@ struct Tail<const CHANNELS: usize> {
     delays: [StaticSampleDelay; CHANNELS],
     /// One block of samples
     process_temp_buffers: [Vec<Sample>; CHANNELS],
+    householder_matrix: [[Sample; CHANNELS]; CHANNELS],
 }
 
 impl<const CHANNELS: usize> Tail<CHANNELS> {
@@ -111,6 +113,7 @@ impl<const CHANNELS: usize> Tail<CHANNELS> {
             feedback_gain: feedback,
             process_temp_buffers: std::array::from_fn(|_| vec![0.0; 0]),
             delays,
+            householder_matrix: random_householder(),
         }
     }
     /// Init internal buffers to the block size. Not real time safe.
@@ -153,7 +156,7 @@ impl<const CHANNELS: usize> Tail<CHANNELS> {
 }
 
 const CHANNELS: usize = 8;
-const DIFFUSERS: usize = 8;
+const DIFFUSERS: usize = 4;
 pub struct LuffVerb {
     diffusers: [Diffuser<CHANNELS>; DIFFUSERS],
     tail: Tail<CHANNELS>,
@@ -190,21 +193,53 @@ impl LuffVerb {
         }
         for diffuser in &mut self.diffusers {
             diffuser.process_block(in_buf, out_buf);
-            std::mem::swap(in_buf, out_buf);
+            std::mem::swap(&mut in_buf, &mut out_buf);
         }
         let early_reflections_amount = 0.3;
         for (out_sample, out_channel) in output.iter_mut().zip(out_buf.iter()) {
             *out_sample = out_channel.iter().sum::<f32>() * early_reflections_amount;
         }
-        // self.tail.process_block(in_buf, out_buf);
-        // // Sum output channels
-        // let compensation_amp = 1.0 / CHANNELS as f32;
-        // for (f, out_sample) in output.iter_mut().enumerate() {
-        //     for channel in out_buf.iter_mut() {
-        //         *out_sample += channel[f];
-        //     }
-        // }
+        std::mem::swap(&mut in_buf, &mut out_buf);
+        self.tail.process_block(in_buf, out_buf);
+        // Sum output channels
+        let compensation_amp = 1.0 / CHANNELS as f32;
+        for (f, out_sample) in output.iter_mut().enumerate() {
+            for channel in out_buf.iter_mut() {
+                *out_sample += channel[f];
+            }
+            *out_sample *= compensation_amp;
+        }
         GenState::Continue
+    }
+}
+
+mod householder {
+    use knyst::Sample;
+    use rand::{thread_rng, Rng};
+    use rand_distr::StandardNormal;
+    pub fn householder<const N: usize>(uv: [Sample; N]) -> [[Sample; N]; N] {
+        let mut matrix = [[0.0; N]; N];
+        for row in 0..N {
+            for column in 0..N {
+                let identity = if row == column { 1.0 } else { 0.0 };
+                matrix[row][column] = identity - 2. * uv[row] * uv[column];
+            }
+        }
+        matrix
+    }
+
+    pub fn random_householder<const N: usize>() -> [[Sample; N]; N] {
+        let mut rng = thread_rng();
+        // TODO: rng distribution?
+        let mut uv: [Sample; N] = std::array::from_fn(|_| rng.sample(StandardNormal));
+        // Normalize uv
+        let sum_squared: Sample = uv.iter().map(|&v| v * v).sum();
+        let norm = 1.0 / sum_squared.sqrt();
+        for v in &mut uv {
+            *v *= norm;
+        }
+        // Use uv as input to create Householder
+        householder(uv)
     }
 }
 

@@ -45,7 +45,7 @@ fn main() -> Result<()> {
 
         // graph_output(0, graph);
         verb.input(graph.out(0) * 0.1);
-        std::thread::sleep(std::time::Duration::from_millis(1500));
+        std::thread::sleep(std::time::Duration::from_millis(2500));
     }
 
     // graph_output(0, (sine(wt).freq(200.)).repeat_outputs(1));
