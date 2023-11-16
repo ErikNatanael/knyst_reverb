@@ -1,7 +1,7 @@
 use std::time::SystemTime;
 
 use knyst::{
-    filter::one_pole::*,
+    gen::filter::one_pole::*,
     prelude::{
         delay::{SampleDelay, StaticSampleDelay},
         impl_gen, Gen, GenState,
