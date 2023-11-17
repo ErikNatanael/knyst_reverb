@@ -51,7 +51,6 @@ impl<const CHANNELS: usize> Diffuser<CHANNELS> {
             let time_min = (max_delay_length_in_samples / CHANNELS * i) as usize + 1;
             let time_max = max_delay_length_in_samples / CHANNELS * (i + 1);
             let delay_time = rng.gen_range(time_min..time_max);
-            dbg!(delay_time);
             StaticSampleDelay::new(delay_time)
         });
 
