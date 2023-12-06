@@ -240,7 +240,7 @@ impl LuffVerb {
         self.tail
             .process_block(in_buf, out_buf, damping, sample_rate);
         // Sum output channels
-        let compensation_amp = 1.0 / (CHANNELS as f32 * DIFFUSERS as f32);
+        let compensation_amp = 1.0 / (CHANNELS as Sample * DIFFUSERS as Sample);
         for (f, out_sample) in output.iter_mut().enumerate() {
             for channel in out_buf.iter_mut() {
                 *out_sample += channel[f];
@@ -291,7 +291,7 @@ mod matrix {
             }
             sum *= Householder::<CHANNELS>::MULTIPLIER;
             for f in frame.iter_mut() {
-                *f += sum as f32;
+                *f += sum as Sample;
             }
         }
     }

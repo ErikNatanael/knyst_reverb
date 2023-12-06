@@ -10,7 +10,7 @@ use knyst::{
     sphere::{KnystSphere, SphereSettings},
     trig::interval_trig,
 };
-use knyst_reverb::luff_verb;
+use knyst_reverb::{galactic::galactic, luff_verb};
 use rand::{thread_rng, Rng};
 fn main() -> Result<()> {
     // let mut backend = CpalBackend::new(CpalBackendOptions::default())?;
@@ -28,7 +28,7 @@ fn main() -> Result<()> {
     let mut rng = thread_rng();
     knyst().init_local_graph(knyst().default_graph_settings());
     for freq in [300, 400, 500, 600, 700, 800].iter() {
-        let sig = sine().freq(*freq as f32).out("sig") * 0.25;
+        let sig = sine().freq(*freq as Sample).out("sig") * 0.25;
         let env = Envelope {
             points: vec![(1.0, 0.001), (0.0, 0.2)],
             ..Default::default()
@@ -36,19 +36,25 @@ fn main() -> Result<()> {
         let sig = sig
             * handle(env.to_gen()).set(
                 "restart",
-                interval_trig().interval(rng.gen_range(1.5f32..3.5)),
+                interval_trig().interval(rng.gen_range(0.5..10.5)),
             );
         graph_output(0, sig);
     }
     let sig = knyst().upload_local_graph();
-    let verb = luff_verb(2350 * 48, 0.65).lowpass(7000.).damping(4000.);
+    let verb = galactic()
+        .size(1.0)
+        .brightness(0.9)
+        .detune(0.2)
+        .mix(0.5)
+        .replace(0.1);
     // .input(sig * 0.125);
-    verb.input(sig * 0.125 + graph_input(0, 1));
-    // verb.input(graph_input(0, 1));
+    // .input(sig * 0.125 + graph_input(0, 1));
+    verb.left(sig + graph_input(0, 1));
+    verb.right(sig + graph_input(0, 1));
     // verb.input(sig * 0.125);
-    let sig = verb * 0.5;
+    let sig = verb;
     // let sig = verb * 0.25 + (sig * 0.25);
-    graph_output(0, sig.repeat_outputs(1));
+    graph_output(0, sig);
 
     // std::thread::sleep(std::time::Duration::from_millis(150));
     // for &freq in [400, 600, 500].iter().cycle() {
@@ -79,13 +85,39 @@ fn main() -> Result<()> {
 
     let mut input = String::new();
     loop {
+        println!("1. Replace\n2.Brightness\n3.Detune\n4.Bigness\n5.Dry/wet\n");
+        print!(": ");
         match std::io::stdin().read_line(&mut input) {
             Ok(n) => {
-                println!("{} bytes read", n);
-                println!("{}", input.trim());
-                let input = input.trim();
-                if let Ok(freq) = input.parse::<usize>() {
-                    // node0.freq(freq as f32);
+                let trimmed_input = input.trim();
+                if let Ok(param) = trimmed_input.parse::<usize>() {
+                    println!("param: {param}");
+                    input.clear();
+                    if let Ok(n) = std::io::stdin().read_line(&mut input) {
+                        let trimmed_input = input.trim();
+                        dbg!(trimmed_input);
+                        if let Ok(value) = trimmed_input.parse::<f32>() {
+                            println!("Setting {param} to {value}");
+                            match param {
+                                1 => {
+                                    verb.replace(value);
+                                }
+                                2 => {
+                                    verb.brightness(value);
+                                }
+                                3 => {
+                                    verb.detune(value);
+                                }
+                                4 => {
+                                    verb.size(value);
+                                }
+                                5 => {
+                                    verb.mix(value);
+                                }
+                                _ => (),
+                            };
+                        }
+                    }
                 } else if input == "q" {
                     break;
                 }
